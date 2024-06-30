@@ -1,8 +1,6 @@
-// client1.mjs
 import { HOSTNAME } from './auth/server-auth.mjs'
 import * as dgram from 'node:dgram'
 
-// const UDP_PORT = 5005;
 const STUN_SERVER = '74.125.250.129' //'stun.l.google.com' todo dns request
 const STUN_PORT = 19302
 
@@ -15,7 +13,6 @@ export default class Client {
   #udpServer
   #address = null
   #port = null
-  #flagFromServer = false
   #index = 1
 
   constructor ({ name }) {
@@ -36,7 +33,6 @@ export default class Client {
     buffer.writeUInt16BE(0x0000, 2)
     buffer.writeUInt32BE(0x2112A442, 4)
 
-    // Transaction ID (random 12 bytes)
     for (let i = 8; i < 20; i++) {
       buffer[i] = Math.floor(Math.random() * 256)
     }
@@ -50,7 +46,6 @@ export default class Client {
   }
 
   #onStunResponse (msg) {
-    // const messageType = msg.readUInt16BE(0)
     const messageLength = msg.readUInt16BE(2)
     const magicCookie = msg.readUInt32BE(4)
 
@@ -62,7 +57,7 @@ export default class Client {
     while (offset < 20 + messageLength) {
       const attributeType = msg.readUInt16BE(offset)
       const attributeLength = msg.readUInt16BE(offset + 2)
-      if (attributeType === 0x0020) { // XOR-MAPPED-ADDRESS
+      if (attributeType === 0x0020) {
         const family = msg.readUInt8(offset + 5)
         let port = msg.readUInt16BE(offset + 6) ^ (magicCookie >> 16)
         let address
@@ -81,7 +76,6 @@ export default class Client {
 
   #onMessage (data, { address, port }) {
     if (address === STUN_SERVER && port === STUN_PORT) {
-      // console.log(`stun response ${data.length}`)
       this.#onStunResponse(data)
       return
     }
