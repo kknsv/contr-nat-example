@@ -8,9 +8,9 @@ const peers = {}
 app.use(express.json())
 
 app.post('/client', (req, res) => {
-  const { address, port, name } = req.body
+  const { address, port, name, id} = req.body
   console.log('from', address, port, name)
-  peers[name] = { address, port, name }
+  peers[name] = { address, port, name, id }
 
   res.status(200).end()
 })
