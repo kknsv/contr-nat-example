@@ -1,33 +1,87 @@
-import { HOSTNAME } from './auth/server-auth.mjs'
 import * as dgram from 'node:dgram'
+import net from 'net'
+import { HOSTNAME } from './auth/server-auth.mjs'
 
 const STUN_SERVER = '74.125.250.129' //'stun.l.google.com' todo dns request
 const STUN_PORT = 19302
 
 export default class Client {
+  static #STATES = ['init', 'receiveIP', 'receivedIP', 'connectToTCP', 'connectToTCP2', 'connectToTCP3', 'listenTCP', 'sending', 'websocket']
+  #tcpServer
   #intervalIdSync
   #intervalIdStun
   #intervalIdMsg
   #peers
   #name
+  #friend
+  /** @type{Socket} */
   #udpServer
   #address = null
   #port = null
   #index = 1
+  #id = 0
+  #currentState = ''
+  #socket
 
-  constructor ({ name }) {
+  constructor ({ name, friend }) {
     this.#name = name
-    this.#udpServer = dgram.createSocket('udp4')
-    this.#udpServer.on('message', this.#onMessage.bind(this))
     this.#peers = {}
     this.#index = 1
+    this.#friend = friend
+    this.#id = Math.round(Math.random() * 1000000)
+    this.#currentState = 'init'
 
-    this.#intervalIdSync = setInterval(this.#updateClients.bind(this), 200)
-    this.#intervalIdStun = setInterval(this.#updateStun.bind(this), 100)
-    this.#intervalIdMsg = setInterval(this.#sendMessageToAllPeers.bind(this), 100)
+    this.#createUdpServer()
   }
 
-  static createStunMessage () {
+  get #state () {
+    return this.#currentState
+  }
+
+  set #state (state) {
+    if (!Client.#STATES.includes(state)) {
+      throw new Error('Invalid state')
+    }
+
+    if (this.#state === state) {
+      return
+    }
+
+    console.log(`new state ${state}`)
+
+    this.#currentState = state
+
+    if (this.#currentState === 'connectToTCP') {
+      this.#stopUDPServer(() => {
+        this.#state = 'connectToTCP2'
+      })
+      return
+    }
+
+    if (this.#currentState === 'connectToTCP2') {
+      const obj = this.#peers[this.#friend]
+
+      if (obj.id > this.#id) {
+        this.#currentState = 'connectToTCP3'
+      } else {
+        this.#currentState = 'listenTCP'
+        this.#createTCPServer()
+      }
+    }
+
+    if (this.#currentState === 'connectToTCP3') {
+      this.#connectToTCP().catch(console.error)
+      return
+    }
+
+    if (this.#currentState === 'sending') {
+      this.#socket.on('data', data => console.log(this.#id, data.toString()))
+      setInterval(() => this.#socket.write(`from client${this.#name} - ${this.#index++} - ${Date.now()}`), 1000)
+      return
+    }
+  }
+
+  static #createStunMessage () {
     const buffer = Buffer.alloc(20)
     buffer.writeUInt16BE(0x0001, 0)
     buffer.writeUInt16BE(0x0000, 2)
@@ -40,8 +94,65 @@ export default class Client {
     return buffer
   }
 
+  #createTCPServer () {
+    console.log(`createTCPServer`)
+    this.#tcpServer = net.createServer(socket => {
+      this.#socket = socket
+      this.#state = 'sending'
+    })
+
+    this.#tcpServer.listen({ port: this.#port },)
+  }
+
+  #sendMessageToAllPeers () {
+    for (const { address, port, name } of Object.values(this.#peers)) {
+      const message = `Message from ${this.#name} to ${name} id:${this.#index++}`
+      console.log(`sending to peers ${message}`)
+      this.#udpServer.send(message, port, address, err => err && console.log(err))
+    }
+  }
+
+  async #connectToTCP () {
+    await new Promise(resolve => setTimeout(resolve, 1000))
+    const peer = this.#peers[this.#friend]
+
+    console.log(`connectToTCP ${peer.address}:${peer.port}`)
+
+    net.connect({
+      host: peer.address,
+      port: peer.port,
+      localPort: this.#port
+    }, (err, socket) => {
+      if (err) {
+        console.error(err)
+        return
+      }
+
+      this.#socket = socket
+      this.#state = 'sending'
+    })
+  }
+
+  #createUdpServer () {
+    this.#udpServer = dgram.createSocket('udp4')
+    this.#udpServer.bind()
+    this.#udpServer.on('message', this.#onMessage.bind(this))
+    this.#intervalIdSync = setInterval(this.#updateClients.bind(this), 100)
+    this.#intervalIdStun = setInterval(this.#updateStun.bind(this), 100)
+    this.#intervalIdMsg = setInterval(this.#sendMessageToAllPeers.bind(this), 100)
+    this.#state = 'receiveIP'
+  }
+
+  #stopUDPServer (callback) {
+    clearInterval(this.#intervalIdSync)
+    clearInterval(this.#intervalIdStun)
+    clearInterval(this.#intervalIdMsg)
+
+    this.#udpServer.close(callback)
+  }
+
   #updateStun () {
-    const message = Client.createStunMessage()
+    const message = Client.#createStunMessage()
     this.#udpServer.send(message, 0, message.length, STUN_PORT, STUN_SERVER, (err) => err && console.log(err))
   }
 
@@ -77,12 +188,17 @@ export default class Client {
   #onMessage (data, { address, port }) {
     if (address === STUN_SERVER && port === STUN_PORT) {
       this.#onStunResponse(data)
+      this.#state = 'receivedIP'
       return
     }
 
-    const obj = this.#peers[`${address}:${port}`]
+    const obj = Object.values(this.#peers).find(peer => peer.address === address && peer.port === port)
 
     console.log(`!!!!Received message on client ${this.#name} from ${obj?.name}:`, data.toString())
+
+    if (obj.name === this.#friend) {
+      this.#state = 'connectToTCP'
+    }
   }
 
   #updateMyAddress ({ address, port }) {
@@ -102,7 +218,8 @@ export default class Client {
       body: JSON.stringify({
         name: this.#name,
         address,
-        port
+        port,
+        id: this.#id
       })
     }).catch(console.error)
   }
@@ -116,16 +233,13 @@ export default class Client {
       }
 
       if (this.#name !== value.name) {
-        this.#peers[`${value.address}:${value.port}`] = value
+        if (!this.#peers[value.name]) {
+          console.log(`new ip for ${value.name}  ${value.address}:${value.port} `)
+        }
+
+        this.#peers[value.name] = value
       }
     })
-  }
-
-  #sendMessageToAllPeers () {
-    for (const { address, port, name } of Object.values(this.#peers)) {
-      const message = `Message from ${this.#name} to ${name} id:${this.#index++}`
-      this.#udpServer.send(message, port, address, err => err && console.log(err))
-    }
   }
 }
 
